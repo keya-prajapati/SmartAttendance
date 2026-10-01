@@ -26,7 +26,7 @@ import RoleDashboard from "./dashboard/RoleDashboardPage";
 
 import "./App.css";
 
-const API_URL = "http://localhost:5000";
+const API_URL = "https://smartattendance-1-5p5m.onrender.com";
 
 /* =========================================================
    DEMO LANDING PAGE DATA

@@ -7,7 +7,7 @@ import "./Dashboard.css";
    StudentDashboard. This file holds NO dashboard of its own and NO data.
    ===================================================================== */
 
-export const API = "http://localhost:5000/api";
+export const API = "https://smartattendance-1-5p5m.onrender.com";
 
 /* ---------- generic helpers ---------- */
 export const pick = (obj, keys) => {
