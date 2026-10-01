@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { LayoutDashboard, ClipboardCheck, CalendarDays, UserCircle, Settings, Download, RotateCcw } from "lucide-react";
+import { LayoutDashboard, ClipboardCheck, UserCircle, Settings, Download, RotateCcw, CalendarDays, Megaphone } from "lucide-react";
 import {
   api, toList, normStudent, normRecord, initials, classLabel, fmtDate, pctText, dash, downloadCSV,
   Shell, StatCards, Panel, Pill, RefreshButton, useNotify,
 } from "./DashboardShared";
 import { SettingsPage } from "./DashboardPages";
+import AnnouncementsPage from "./AnnouncementsPage";
 import { lectureTime } from "./SchoolPages";
 const taken = (v) => (v ? lectureTime(String(v).slice(11, 16), String(v).slice(11, 16)).split(" - ")[0] : "—");
 
@@ -12,25 +13,33 @@ const NAV = [
   { key: "overview", label: "Overview", icon: LayoutDashboard },
   { key: "attendance", label: "My Attendance", icon: ClipboardCheck },
   { key: "timetable", label: "My Timetable", icon: CalendarDays },
+  { key: "announcements", label: "Announcements", icon: Megaphone },
   { key: "profile", label: "Profile", icon: UserCircle },
   { key: "settings", label: "Settings", icon: Settings },
 ];
+const WEEK_DAYS = [
+  { value: 1, label: "Monday" }, { value: 2, label: "Tuesday" }, { value: 3, label: "Wednesday" },
+  { value: 4, label: "Thursday" }, { value: 5, label: "Friday" }, { value: 6, label: "Saturday" },
+];
 
-/* The student only ever calls /students/me/* endpoints.
+/* The student only ever calls /students/me and /attendance/my.
    The server resolves "me" from the JWT + the Users.StudentID link, so nothing is guessed on the client. */
 function useStudentData() {
-  const [state, setState] = useState({ me: null, records: [], loading: true, refreshing: false, notLinked: false, error: null, syncedAt: null });
+  const [state, setState] = useState({ me: null, records: [], timetable: [], loading: true, refreshing: false, notLinked: false, error: null, attendanceError: null, timetableError: null, syncedAt: null });
 
   const load = useCallback(async () => {
     setState((s) => ({ ...s, refreshing: true }));
-    const [m, a] = await Promise.allSettled([api("/students/me"), api("/students/me/attendance")]);
-    const notLinked = [m, a].some((r) => r.status === "rejected" && r.reason.code === "NOT_LINKED");
-    const failed = [m, a].find((r) => r.status === "rejected" && r.reason.code !== "NOT_LINKED");
+    const [m, a, t] = await Promise.allSettled([api("/students/me"), api("/attendance/my"), api("/students/me/timetable")]);
+    const notLinked = [m, a, t].some((r) => r.status === "rejected" && r.reason.code === "NOT_LINKED");
+    const failed = [m, a, t].find((r) => r.status === "rejected" && r.reason.code !== "NOT_LINKED");
     setState({
       me: m.status === "fulfilled" ? normStudent(m.value) : null,
       records: a.status === "fulfilled" ? toList(a.value).map(normRecord).filter((r) => r.date && r.status) : [],
+      timetable: t.status === "fulfilled" ? toList(t.value) : [],
       notLinked,
       error: failed ? failed.reason.message : null,
+      attendanceError: a.status === "rejected" ? a.reason.message : null,
+      timetableError: t.status === "rejected" ? t.reason.message : null,
       loading: false,
       refreshing: false,
       syncedAt: new Date(),
@@ -44,7 +53,7 @@ function useStudentData() {
 const monthLabel = (k) => new Date(`${k}-01T00:00:00`).toLocaleDateString("en-IN", { month: "long", year: "numeric" });
 
 export default function StudentDashboard({ user, onUserChange, onNavigate, onLogout }) {
-  const { me, records, loading, refreshing, notLinked, error, reload } = useStudentData();
+  const { me, records, timetable, loading, refreshing, notLinked, error, attendanceError, timetableError, reload } = useStudentData();
   const [page, setPage] = useState("overview");
 
   const stats = useMemo(() => {
@@ -68,6 +77,11 @@ export default function StudentDashboard({ user, onUserChange, onNavigate, onLog
   const openPage = (p) => { setPage(p); onNavigate?.(p); };
   const ready = !loading;
   const share = (n) => (stats.total ? (n / stats.total) * 100 : 0);
+  const todayKey = new Date().toLocaleDateString("en-CA");
+  const todayRecords = records.filter((r) => r.date === todayKey);
+  const jsDay = new Date(`${todayKey}T00:00:00`).getDay();
+  const todayDayOfWeek = jsDay === 0 ? 7 : jsDay;
+  const todayTimetable = timetable.filter((entry) => Number(entry.dayOfWeek) === todayDayOfWeek);
 
   const notices = useMemo(() => {
     if (loading || stats.pct === null) return [];
@@ -105,7 +119,7 @@ export default function StudentDashboard({ user, onUserChange, onNavigate, onLog
               <div><dt>Roll Number</dt><dd>{dash(me.roll)}</dd></div>
               <div><dt>Class</dt><dd>{dash(me.cls)}</dd></div>
               <div><dt>Section</dt><dd>{dash(me.section)}</dd></div>
-              <div><dt>Username</dt><dd>{dash(me.linkedUsername || user?.username)}</dd></div>
+              <div><dt>Student ID</dt><dd>{dash(me.id)}</dd></div>
               <div><dt>Parent Name</dt><dd>{dash(me.parentName)}</dd></div>
               <div><dt>Parent Phone</dt><dd>{dash(me.parentPhone)}</dd></div>
             </dl>
@@ -125,6 +139,16 @@ export default function StudentDashboard({ user, onUserChange, onNavigate, onLog
           {me && (
             <>
               <StatCards items={cards} />
+              <Panel title="Today's Attendance" sub={fmtDate(todayKey)}>
+                {loading ? <div className="dash-empty">Loading today's attendance…</div> : attendanceError ? <div className="dash-empty">Today's attendance could not be loaded.</div> : !todayRecords.length ? <div className="dash-empty">No attendance record found for today.</div> : (
+                  <div className="dash-table-wrap"><table className="dash-table"><thead><tr><th>Period</th><th>Subject</th><th>Status</th></tr></thead><tbody>{todayRecords.map((r, i) => (
+                    <tr key={`${r.date}-${r.period ?? i}`}><td>{dash(r.period)}</td><td>{dash(r.subject)}</td><td><Pill status={r.status} /></td></tr>
+                  ))}</tbody></table></div>
+                )}
+              </Panel>
+              <Panel title="Today's Timetable" sub="Assigned periods for your class and section" right={<button className="dash-ghost-btn" onClick={() => setPage("timetable")}>Full timetable</button>}>
+                <TimetableContent rows={todayTimetable} loading={loading} error={timetableError} />
+              </Panel>
               <Panel id="attendance-overview" title="Attendance Overview" sub={classLabel(me.cls, me.section)}>
                 {stats.total === 0 ? (
                   <div className="dash-empty">No attendance has been recorded for you yet.</div>
@@ -188,10 +212,33 @@ export default function StudentDashboard({ user, onUserChange, onNavigate, onLog
           <Panel title="My Attendance"><div className="dash-empty">{notLinked ? notLinkedMsg : "Your attendance could not be loaded."}</div></Panel>
         )
       )}
-      {page === "timetable" && <MyTimetable me={me} />}
+      {page === "timetable" && me && <Panel title="My Timetable" sub={classLabel(me.cls, me.section)} right={<RefreshButton onClick={reload} busy={refreshing} />}><TimetableContent rows={timetable} loading={loading} error={timetableError} weekly /></Panel>}
+      {page === "timetable" && !me && <Panel title="My Timetable"><div className="dash-empty">{loading ? "Loading your timetable…" : notLinked ? notLinkedMsg : "Your timetable could not be loaded."}</div></Panel>}
+      {page === "announcements" && <AnnouncementsPage />}
       {page === "profile" && profilePanel}
       {page === "settings" && <SettingsPage user={user} onUserChange={onUserChange} onLogout={onLogout} />}
     </Shell>
+  );
+}
+
+function TimetableContent({ rows, loading, error, weekly = false }) {
+  if (loading) return <div className="dash-empty">Loading your timetable…</div>;
+  if (error) return <div className="dash-empty">Your timetable could not be loaded.</div>;
+  if (!rows.length && !weekly) return <div className="dash-empty">No timetable assigned yet.</div>;
+  if (weekly) return (
+    <div className="dash-stack">{WEEK_DAYS.map((day) => {
+      const dayRows = rows.filter((row) => Number(row.dayOfWeek) === day.value);
+      return <section key={day.value}><h2 className="dash-day-heading">{day.label}</h2>{!dayRows.length ? <div className="dash-muted">No periods assigned.</div> : (
+        <div className="dash-table-wrap"><table className="dash-table"><thead><tr><th>Period</th><th>Subject</th><th>Teacher</th><th>Start Time</th><th>End Time</th></tr></thead><tbody>{dayRows.map((row) => (
+          <tr key={row.timetableEntryId}><td>{dash(row.period)}</td><td>{dash(row.subject)}</td><td>{dash(row.teacher)}</td><td>{dash(row.startTime)}</td><td>{dash(row.endTime)}</td></tr>
+        ))}</tbody></table></div>
+      )}</section>;
+    })}</div>
+  );
+  return (
+    <div className="dash-table-wrap"><table className="dash-table"><thead><tr><th>Period</th><th>Subject</th><th>Teacher</th><th>Start Time</th><th>End Time</th></tr></thead><tbody>{rows.map((row) => (
+      <tr key={row.assignmentId}><td>{dash(row.period)}</td><td>{dash(row.subject)}</td><td>{dash(row.teacher)}</td><td>{dash(row.startTime)}</td><td>{dash(row.endTime)}</td></tr>
+    ))}</tbody></table></div>
   );
 }
 
@@ -201,15 +248,13 @@ function MyAttendance({ stats, loading, refreshing, reload, me }) {
   const [to, setTo] = useState("");
   const [status, setStatus] = useState("");
   const [month, setMonth] = useState("");
-  const [subject, setSubject] = useState("");
-  const subjects = useMemo(() => [...new Set(stats.sorted.map((r) => r.subject).filter(Boolean))].sort(), [stats.sorted]);
 
   const rows = useMemo(
-    () => stats.sorted.filter((r) => (!from || r.date >= from) && (!to || r.date <= to) && (!status || r.status === status) && (!month || r.date.startsWith(month)) && (!subject || r.subject === subject)),
-    [stats.sorted, from, to, status, month, subject]
+    () => stats.sorted.filter((r) => (!from || r.date >= from) && (!to || r.date <= to) && (!status || r.status === status) && (!month || r.date.startsWith(month))),
+    [stats.sorted, from, to, status, month]
   );
   const p = rows.filter((r) => r.status === "present").length;
-  const any = from || to || status || month || subject;
+  const any = from || to || status || month;
 
   const exportCsv = () => {
     if (!rows.length) return notify("There are no records to export.", "info");
@@ -241,19 +286,12 @@ function MyAttendance({ stats, loading, refreshing, reload, me }) {
         <label className="dash-field"><span>From</span><input type="date" value={from} max={to || undefined} onChange={(e) => setFrom(e.target.value)} /></label>
         <label className="dash-field"><span>To</span><input type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} /></label>
         <label className="dash-field">
-          <span>Subject</span>
-          <select value={subject} onChange={(e) => setSubject(e.target.value)}>
-            <option value="">All subjects</option>
-            {subjects.map((x) => <option key={x} value={x}>{x}</option>)}
-          </select>
-        </label>
-        <label className="dash-field">
           <span>Status</span>
           <select value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="">All</option><option value="present">Present</option><option value="absent">Absent</option>
           </select>
         </label>
-        {any && <button className="dash-ghost-btn" onClick={() => { setFrom(""); setTo(""); setStatus(""); setMonth(""); setSubject(""); }}><RotateCcw size={14} /> Reset</button>}
+        {any && <button className="dash-ghost-btn" onClick={() => { setFrom(""); setTo(""); setStatus(""); setMonth(""); }}><RotateCcw size={14} /> Reset</button>}
       </div>
 
       {loading ? (
@@ -278,25 +316,6 @@ function MyAttendance({ stats, loading, refreshing, reload, me }) {
           </table>
         </div>
       )}
-    </Panel>
-  );
-}
-
-function MyTimetable({ me }) {
-  const [rows, setRows] = useState(null);
-  const [err, setErr] = useState("");
-  useEffect(() => { api("/students/me/timetable").then((d) => setRows(toList(d))).catch((e) => { setRows([]); setErr(e.message); }); }, []);
-  return (
-    <Panel id="timetable" title="My Timetable" sub={me ? `Class ${classLabel(me.cls, me.section)} · same period schedule every school day` : ""}>
-      {rows === null ? <div className="dash-empty">Loading timetable…</div>
-        : err ? <div className="dash-empty">{err}</div>
-        : !rows.length ? <div className="dash-empty">No timetable has been set up for your class yet.</div>
-        : (
-          <div className="dash-table-wrap"><table className="dash-table">
-            <thead><tr><th>Period</th><th>Subject</th><th>Teacher</th><th>Start</th><th>End</th></tr></thead>
-            <tbody>{rows.map((r) => <tr key={r.AssignmentID}><td>{r.Period}</td><td>{dash(r.Subject)}</td><td>{dash(r.TeacherName)}</td><td>{lectureTime(r.StartTime, r.StartTime).split(" - ")[0]}</td><td>{lectureTime(r.EndTime, r.EndTime).split(" - ")[0]}</td></tr>)}</tbody>
-          </table></div>
-        )}
     </Panel>
   );
 }

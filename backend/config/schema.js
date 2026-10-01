@@ -37,6 +37,86 @@ async function ensureSection(db, classId, name) {
   return Number(ins[0].id);
 }
 
+async function migrateTimetable(db) {
+  await db.withTransaction(async (tx) => {
+    await tx.query(`IF NOT EXISTS (
+      SELECT 1 FROM sys.indexes WHERE name='UX_Sections_Class_Section' AND object_id=OBJECT_ID('dbo.Sections'))
+      CREATE UNIQUE INDEX UX_Sections_Class_Section ON dbo.Sections (ClassID, SectionID)`);
+    await tx.query(`IF OBJECT_ID('dbo.TimetableEntries','U') IS NULL
+      CREATE TABLE dbo.TimetableEntries (
+        TimetableEntryID INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_TimetableEntries PRIMARY KEY,
+        DayOfWeek TINYINT NOT NULL,
+        ClassID INT NOT NULL,
+        SectionID INT NOT NULL,
+        TeacherUserID INT NOT NULL,
+        SubjectID INT NOT NULL,
+        Period INT NOT NULL,
+        StartTime TIME(0) NOT NULL,
+        EndTime TIME(0) NOT NULL,
+        CreatedAt DATETIME2(0) NOT NULL CONSTRAINT DF_TimetableEntries_CreatedAt DEFAULT SYSDATETIME(),
+        CONSTRAINT CK_TimetableEntries_Day CHECK (DayOfWeek BETWEEN 1 AND 6),
+        CONSTRAINT CK_TimetableEntries_Period CHECK (Period BETWEEN 1 AND 12),
+        CONSTRAINT CK_TimetableEntries_Time CHECK (StartTime < EndTime),
+        CONSTRAINT FK_TimetableEntries_Class FOREIGN KEY (ClassID) REFERENCES dbo.Classes(ClassID),
+        CONSTRAINT FK_TimetableEntries_ClassSection FOREIGN KEY (ClassID, SectionID) REFERENCES dbo.Sections(ClassID, SectionID),
+        CONSTRAINT FK_TimetableEntries_Teacher FOREIGN KEY (TeacherUserID) REFERENCES dbo.Users(UserId),
+        CONSTRAINT FK_TimetableEntries_Subject FOREIGN KEY (SubjectID) REFERENCES dbo.Subjects(SubjectID),
+        CONSTRAINT UQ_Timetable_ClassSectionDayPeriod UNIQUE (ClassID, SectionID, DayOfWeek, Period),
+        CONSTRAINT UQ_Timetable_TeacherDayPeriod UNIQUE (TeacherUserID, DayOfWeek, Period)
+      )`);
+    await tx.query(`IF NOT EXISTS (
+      SELECT 1 FROM sys.indexes WHERE name='IX_TimetableEntries_TeacherDayTime' AND object_id=OBJECT_ID('dbo.TimetableEntries'))
+      CREATE INDEX IX_TimetableEntries_TeacherDayTime ON dbo.TimetableEntries (TeacherUserID, DayOfWeek, StartTime, EndTime)`);
+    await tx.query(`IF NOT EXISTS (
+      SELECT 1 FROM sys.indexes WHERE name='IX_TimetableEntries_ClassSectionDayTime' AND object_id=OBJECT_ID('dbo.TimetableEntries'))
+      CREATE INDEX IX_TimetableEntries_ClassSectionDayTime ON dbo.TimetableEntries (ClassID, SectionID, DayOfWeek, StartTime, EndTime)`);
+    const column = await tx.query("SELECT COL_LENGTH('dbo.Attendance','TimetableEntryID') AS ColumnLength");
+    if (column[0].ColumnLength === null) await tx.query("ALTER TABLE dbo.Attendance ADD TimetableEntryID INT NULL");
+    await tx.query(`IF NOT EXISTS (
+      SELECT 1 FROM sys.foreign_keys WHERE name='FK_Attendance_TimetableEntry' AND parent_object_id=OBJECT_ID('dbo.Attendance'))
+      ALTER TABLE dbo.Attendance ADD CONSTRAINT FK_Attendance_TimetableEntry
+      FOREIGN KEY (TimetableEntryID) REFERENCES dbo.TimetableEntries(TimetableEntryID)`);
+    await tx.query(`IF EXISTS (
+      SELECT 1 FROM sys.key_constraints WHERE name='UQ_Student_Date' AND parent_object_id=OBJECT_ID('dbo.Attendance'))
+      ALTER TABLE dbo.Attendance DROP CONSTRAINT UQ_Student_Date`);
+    await tx.query(`IF NOT EXISTS (
+      SELECT 1 FROM sys.indexes WHERE name='UX_Attendance_Legacy_Student_Date' AND object_id=OBJECT_ID('dbo.Attendance'))
+      CREATE UNIQUE INDEX UX_Attendance_Legacy_Student_Date ON dbo.Attendance (StudentID, [Date]) WHERE Period IS NULL`);
+  });
+}
+
+async function migrateAnnouncements(db) {
+  await db.withTransaction(async (tx) => {
+    await tx.query(`IF OBJECT_ID('dbo.Announcements','U') IS NULL
+      CREATE TABLE dbo.Announcements (
+        AnnouncementID INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_Announcements PRIMARY KEY,
+        Title NVARCHAR(160) NOT NULL,
+        Message NVARCHAR(MAX) NOT NULL,
+        AnnouncementType NVARCHAR(20) NOT NULL,
+        TargetAudience NVARCHAR(20) NOT NULL,
+        PublishDate DATE NOT NULL,
+        ExpiryDate DATE NULL,
+        IsPublished BIT NOT NULL CONSTRAINT DF_Announcements_IsPublished DEFAULT (0),
+        IsArchived BIT NOT NULL CONSTRAINT DF_Announcements_IsArchived DEFAULT (0),
+        CreatedByUserID INT NOT NULL,
+        CreatedAt DATETIME2(0) NOT NULL CONSTRAINT DF_Announcements_CreatedAt DEFAULT SYSDATETIME(),
+        UpdatedAt DATETIME2(0) NULL,
+        CONSTRAINT CK_Announcements_Title CHECK (LEN(LTRIM(RTRIM(Title))) > 0),
+        CONSTRAINT CK_Announcements_Message CHECK (LEN(LTRIM(RTRIM(Message))) > 0),
+        CONSTRAINT CK_Announcements_Type CHECK (AnnouncementType IN ('General','Exam','Holiday','Event','Important','Other')),
+        CONSTRAINT CK_Announcements_Audience CHECK (TargetAudience IN ('Everyone','Teachers','Students')),
+        CONSTRAINT CK_Announcements_Expiry CHECK (ExpiryDate IS NULL OR ExpiryDate >= PublishDate),
+        CONSTRAINT FK_Announcements_CreatedBy FOREIGN KEY (CreatedByUserID) REFERENCES dbo.Users(UserId)
+      )`);
+    await tx.query(`IF NOT EXISTS (
+      SELECT 1 FROM sys.indexes WHERE name='IX_Announcements_AudienceWindow' AND object_id=OBJECT_ID('dbo.Announcements'))
+      CREATE INDEX IX_Announcements_AudienceWindow ON dbo.Announcements (IsArchived, IsPublished, TargetAudience, PublishDate, ExpiryDate)`);
+    await tx.query(`IF NOT EXISTS (
+      SELECT 1 FROM sys.indexes WHERE name='IX_Announcements_AdminList' AND object_id=OBJECT_ID('dbo.Announcements'))
+      CREATE INDEX IX_Announcements_AdminList ON dbo.Announcements (CreatedAt DESC, AnnouncementID DESC)`);
+  });
+}
+
 async function migrate() {
   const db = await getConnection();
 
@@ -93,6 +173,7 @@ async function migrate() {
   await addColumn(db, "Users", "StudentID", "INT NULL");
   await addColumn(db, "Students", "ClassID", "INT NULL");
   await addColumn(db, "Students", "SectionID", "INT NULL");
+  await addColumn(db, "Students", "IsActive", "BIT NOT NULL CONSTRAINT DF_Students_IsActive DEFAULT (1)");
   for (const [c, d] of [
     ["ClassID", "INT NULL"], ["SectionID", "INT NULL"], ["SubjectID", "INT NULL"],
     ["TeacherUserID", "INT NULL"], ["AssignmentID", "INT NULL"], ["Period", "INT NULL"],
@@ -114,6 +195,9 @@ async function migrate() {
   for (const [t, name, col, ref] of fks) {
     await run(db, name, `IF OBJECT_ID('${name}','F') IS NULL ALTER TABLE dbo.${t} ADD CONSTRAINT ${name} FOREIGN KEY (${col}) REFERENCES dbo.${ref}`);
   }
+
+  await migrateTimetable(db);
+  await migrateAnnouncements(db);
 
   // duplicate protection for lecture attendance (legacy rows have Period NULL and are excluded)
   await run(db, "UX_Attendance_Lecture", `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='UX_Attendance_Lecture' AND object_id=OBJECT_ID('dbo.Attendance'))

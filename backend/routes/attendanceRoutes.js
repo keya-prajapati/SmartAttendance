@@ -12,6 +12,9 @@ router.get("/report", verifyToken, requireRole("Admin", "Teacher"), c.getAttenda
 router.get("/export", verifyToken, requireRole("Admin", "Teacher"), c.exportAttendance);
 router.get("/history", verifyToken, requireRole("Admin", "Teacher"), c.studentHistory);
 router.get("/summary", verifyToken, requireRole("Admin", "Teacher"), c.getAttendanceSummary);
+router.get("/analytics", verifyToken, requireRole("Admin", "Teacher"), c.getAttendanceAnalytics);
+router.get("/low-attendance", verifyToken, requireRole("Admin", "Teacher"), c.getLowAttendance);
+router.get("/config", verifyToken, requireRole("Admin", "Teacher"), c.getAttendanceConfig);
 router.get("/absent-notifications", verifyToken, requireRole("Admin", "Teacher"), c.absentNotifications);
 router.get("/my", verifyToken, requireRole("Student"), c.getMyAttendance);
 

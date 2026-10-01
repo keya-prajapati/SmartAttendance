@@ -1,13 +1,25 @@
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const { getConnection } = require("../config/db");
 const { getLinkedStudentId } = require("../config/helpers");
-const { createStudentLogin, resetStudentPassword } = require("../config/credentials");
 const { parseClassNumber, ensureSection } = require("../config/schema");
 const { parseFile, pickField } = require("../config/importParser");
+const { toIntlPhone, whatsappUrl } = require("../config/whatsappService");
 
-const fail = (res, err) => { console.error("[API ERROR]", err.message); res.status(500).json({ message: "Something went wrong on the server. Please try again." }); };
+const fail = (res, err) => { console.error("[API ERROR]", err.message); res.status(500).json({ message: `Database error: ${err.message}`, error: err.message }); };
 const isAdmin = (req) => String(req.user.role).toLowerCase() === "admin";
 const phoneOk = (p) => { const d = String(p || "").replace(/\D/g, ""); return d.length >= 7 && d.length <= 15; };
+const portalUrlFor = (req) => {
+  try {
+    const parsed = new URL(process.env.FRONTEND_URL || req.get("origin"));
+    if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) return null;
+    return parsed.origin;
+  } catch { return null; }
+};
+const studentPortalWhatsAppUrl = (student, username, password, portalUrl) => {
+  const message = `Dear Parent,\n\nYour child ${student.Name}'s Student Portal login details are:\n\nUsername: ${username}\nPassword: ${password}\n\nStudent Portal:\n${portalUrl}\n\nPlease keep these credentials safe.`;
+  return whatsappUrl(student.ParentPhone, message);
+};
 
 /* Columns returned to the frontend (Class/Section are the human values). */
 const STUDENT_SELECT = `
@@ -17,7 +29,7 @@ const STUDENT_SELECT = `
   FROM Students st
   LEFT JOIN Classes c ON c.ClassID = st.ClassID
   LEFT JOIN Sections s ON s.SectionID = st.SectionID
-  LEFT JOIN Users lu ON lu.StudentID = st.StudentID`;
+    LEFT JOIN Users lu ON lu.StudentID = st.StudentID AND lu.Role = 'Student'`;
 
 /* Resolve (class, section) text -> ids. Creates a simple section (A, B, 1...) if missing. */
 async function resolveClassSection(db, classVal, sectionVal) {
@@ -33,9 +45,9 @@ async function resolveClassSection(db, classVal, sectionVal) {
   return { classNumber: n, classId, sectionId, sectionName: sec };
 }
 
-/* ---------------- add (a Student login is always created automatically) ---------------- */
+/* ---------------- add ---------------- */
 const addStudent = async (req, res) => {
-  const { rollNumber, name, studentClass, section, parentName, parentPhone } = req.body;
+  const { rollNumber, name, studentClass, section, parentName, parentPhone, createLogin, username, password } = req.body;
   if (!rollNumber || !name || !studentClass || !section || !parentPhone) {
     return res.status(400).json({ message: "Roll number, name, class, section and parent phone are required." });
   }
@@ -53,18 +65,18 @@ const addStudent = async (req, res) => {
       [String(rollNumber).trim(), String(name).trim(), String(cs.classNumber), cs.sectionName, parentName || "", String(parentPhone).trim(), cs.classId, cs.sectionId]);
     const studentId = Number(ins[0].id);
 
-    let login = null, loginError = null;
-    try {
-      login = await createStudentLogin(db, { StudentID: studentId, Name: String(name).trim(), RollNumber: String(rollNumber).trim(), ParentPhone: String(parentPhone).trim() });
-    } catch (e) { console.error("[login create]", e.message); loginError = "The student was saved, but the login could not be created. Use 'Create Login' from the student list."; }
-    res.status(201).json({
-      message: loginError || "Student added successfully. Login credentials generated.",
-      studentId, loginError,
-      username: login ? login.username : null,
-      password: login && login.created ? login.password : null,
-      whatsappUrl: login ? login.whatsappUrl || null : null,
-      whatsappError: login ? login.whatsappError || null : null,
-    });
+    let loginError = null;
+    if (createLogin) {
+      try {
+        if (!username || String(username).trim().length < 3 || !password || String(password).length < 6) throw new Error("Login username needs 3+ characters and password 6+ characters.");
+        const ex = await db.query("SELECT 1 AS x FROM Users WHERE Username = ?", [String(username).trim()]);
+        if (ex.length) throw new Error("Username already exists.");
+        const hash = await bcrypt.hash(String(password), 10);
+        await db.query("INSERT INTO Users (FullName, Username, PasswordHash, Role, Phone, StudentID) VALUES (?, ?, ?, 'Student', ?, ?)",
+          [String(name).trim(), String(username).trim(), hash, String(parentPhone).trim(), studentId]);
+      } catch (e) { loginError = e.message; }
+    }
+    res.status(201).json({ message: loginError ? `Student added, but login was not created: ${loginError}` : "Student added successfully!", studentId, loginError });
   } catch (e) { fail(res, e); }
 };
 
@@ -74,12 +86,12 @@ const getStudents = async (req, res) => {
     const db = await getConnection();
     const role = String(req.user.role).toLowerCase();
     if (role === "admin") {
-      return res.json(await db.query(`${STUDENT_SELECT} ORDER BY c.ClassNumber, s.SectionName, TRY_CAST(st.RollNumber AS INT), st.RollNumber`));
+      return res.json(await db.query(`${STUDENT_SELECT} WHERE st.IsActive = 1 ORDER BY c.ClassNumber, s.SectionName, TRY_CAST(st.RollNumber AS INT), st.RollNumber`));
     }
     if (role === "teacher") {   // only students of the teacher's own assigned class+section
       return res.json(await db.query(
         `${STUDENT_SELECT}
-         WHERE EXISTS (SELECT 1 FROM TeacherAssignments ta WHERE ta.TeacherUserID = ? AND ta.ClassID = st.ClassID AND ta.SectionID = st.SectionID)
+         WHERE st.IsActive = 1 AND EXISTS (SELECT 1 FROM TeacherAssignments ta WHERE ta.TeacherUserID = ? AND ta.ClassID = st.ClassID AND ta.SectionID = st.SectionID)
          ORDER BY c.ClassNumber, s.SectionName, TRY_CAST(st.RollNumber AS INT), st.RollNumber`, [req.user.userId]));
     }
     res.status(403).json({ message: "You do not have permission to view the student list." });
@@ -109,11 +121,42 @@ const updateStudent = async (req, res) => {
 const deleteStudent = async (req, res) => {
   try {
     const db = await getConnection();
-    const a = await db.query("SELECT COUNT(*) AS n FROM Attendance WHERE StudentID = ?", [req.params.id]);
-    if (Number(a[0].n)) return res.status(409).json({ message: `This student has ${a[0].n} attendance record(s). Attendance history is never deleted, so the student cannot be deleted.` });
-    await db.query("UPDATE Users SET StudentID = NULL WHERE StudentID = ?", [req.params.id]);
-    await db.query("DELETE FROM Students WHERE StudentID = ?", [req.params.id]);
-    res.json({ message: "Student deleted." });
+    const students = await db.query("SELECT StudentID FROM Students WHERE StudentID = ?", [req.params.id]);
+    if (!students.length) return res.status(404).json({ message: "Student not found." });
+    const studentId = students[0].StudentID;
+    const history = await db.query("SELECT COUNT(*) AS n FROM Attendance WHERE StudentID = ?", [studentId]);
+    if (Number(history[0].n)) return res.status(409).json({ message: "This student has attendance history and cannot be permanently deleted. You can deactivate this student instead.", code: "HAS_ATTENDANCE" });
+
+    const accounts = await db.query("SELECT UserId FROM Users WHERE StudentID = ? AND Role = 'Student'", [studentId]);
+    for (const account of accounts) {
+      const refs = await db.query(
+        `SELECT (SELECT COUNT(*) FROM TeacherAssignments WHERE TeacherUserID = ?) AS AssignmentRefs,
+                (SELECT COUNT(*) FROM Attendance WHERE TeacherUserID = ?) AS AttendanceRefs`,
+        [account.UserId, account.UserId]
+      );
+      if (Number(refs[0].AssignmentRefs) || Number(refs[0].AttendanceRefs)) {
+        return res.status(409).json({ message: "The linked Student login is referenced by other records and cannot be safely deleted." });
+      }
+    }
+
+    const removed = await db.query(
+      "DELETE FROM Students OUTPUT DELETED.StudentID AS StudentID WHERE StudentID = ? AND NOT EXISTS (SELECT 1 FROM Attendance WHERE StudentID = ?)",
+      [studentId, studentId]
+    );
+    if (!removed.length) return res.status(409).json({ message: "This student has attendance history and cannot be permanently deleted. You can deactivate this student instead.", code: "HAS_ATTENDANCE" });
+    await db.query("DELETE FROM Users WHERE StudentID = ? AND Role = 'Student'", [studentId]);
+    res.json({ message: accounts.length ? "Student and linked login account permanently deleted." : "Student permanently deleted." });
+  } catch (e) { fail(res, e); }
+};
+
+const deactivateStudent = async (req, res) => {
+  try {
+    const db = await getConnection();
+    const exists = await db.query("SELECT StudentID FROM Students WHERE StudentID = ?", [req.params.id]);
+    if (!exists.length) return res.status(404).json({ message: "Student not found." });
+    const updated = await db.query("UPDATE Students SET IsActive = 0 OUTPUT INSERTED.StudentID AS StudentID WHERE StudentID = ? AND IsActive = 1", [exists[0].StudentID]);
+    if (!updated.length) return res.status(409).json({ message: "Student is already deactivated." });
+    res.json({ message: "Student deactivated. Attendance history has been preserved." });
   } catch (e) { fail(res, e); }
 };
 
@@ -123,9 +166,36 @@ const getMe = async (req, res) => {
     const id = await getLinkedStudentId(req.user.userId);
     if (id === null) return res.status(404).json({ message: "Your account is not linked to a student record yet.", code: "NOT_LINKED" });
     const db = await getConnection();
-    const r = await db.query(`${STUDENT_SELECT} WHERE st.StudentID = ?`, [id]);
+    const r = await db.query(`${STUDENT_SELECT} WHERE st.StudentID = ? AND st.IsActive = 1`, [id]);
     if (!r.length) return res.status(404).json({ message: "Student record not found.", code: "NOT_LINKED" });
     res.json(r[0]);
+  } catch (e) { fail(res, e); }
+};
+
+const getMyTimetable = async (req, res) => {
+  try {
+    const studentId = await getLinkedStudentId(req.user.userId);
+    if (studentId === null) return res.status(404).json({ message: "Your account is not linked to a student record yet.", code: "NOT_LINKED" });
+    const db = await getConnection();
+    const students = await db.query("SELECT ClassID, SectionID FROM Students WHERE StudentID = ? AND IsActive = 1", [studentId]);
+    if (!students.length) return res.status(404).json({ message: "Student record not found.", code: "NOT_LINKED" });
+    const { ClassID: classId, SectionID: sectionId } = students[0];
+    if (classId == null || sectionId == null) return res.json([]);
+    const rows = await db.query(
+      `SELECT te.TimetableEntryID, te.DayOfWeek, te.Period,
+              CONVERT(VARCHAR(5), te.StartTime, 108) AS StartTime,
+              CONVERT(VARCHAR(5), te.EndTime, 108) AS EndTime,
+              sub.SubjectName, u.FullName AS TeacherName
+       FROM TimetableEntries te
+       JOIN Classes c ON c.ClassID = te.ClassID
+       JOIN Sections sec ON sec.SectionID = te.SectionID AND sec.ClassID = te.ClassID
+       JOIN Subjects sub ON sub.SubjectID = te.SubjectID
+       JOIN Users u ON u.UserId = te.TeacherUserID AND u.Role = 'Teacher'
+       WHERE te.ClassID = ? AND te.SectionID = ?
+       ORDER BY te.DayOfWeek, te.Period`,
+      [classId, sectionId]
+    );
+    res.json(rows.map((row) => ({ timetableEntryId: row.TimetableEntryID, dayOfWeek: Number(row.DayOfWeek), period: Number(row.Period), subject: row.SubjectName, teacher: row.TeacherName, startTime: row.StartTime, endTime: row.EndTime })));
   } catch (e) { fail(res, e); }
 };
 
@@ -138,19 +208,64 @@ const getAccounts = async (req, res) => {
 };
 
 const linkAccount = async (req, res) => {
-  const { userId } = req.body;
   try {
-    const db = await getConnection();
-    await db.query("UPDATE Users SET StudentID = NULL WHERE StudentID = ?", [req.params.id]);
-    if (userId) {
-      const u = await db.query("SELECT 1 AS x FROM Users WHERE UserId = ? AND Role = 'Student'", [userId]);
-      if (!u.length) return res.status(400).json({ message: "Selected account is not a student login." });
-      await db.query("UPDATE Users SET StudentID = ? WHERE UserId = ?", [req.params.id, userId]);
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, "userId")) {
+      return res.status(400).json({ message: "Student accounts are resolved from the selected student's StudentID; userId selection is not supported." });
     }
-    res.json({ message: userId ? "Login linked to student." : "Login unlinked." });
+    const db = await getConnection();
+    const students = await db.query("SELECT StudentID, Name, ParentPhone FROM Students WHERE StudentID = ? AND IsActive = 1", [req.params.id]);
+    if (!students.length) return res.status(404).json({ message: "Student not found." });
+    const student = students[0];
+    if (req.body?.unlink === true) {
+      await db.query("UPDATE Users SET StudentID = NULL WHERE StudentID = ? AND Role = 'Student'", [student.StudentID]);
+      return res.json({ message: "Login unlinked." });
+    }
+    const accounts = await db.query("SELECT UserId, Username FROM Users WHERE StudentID = ? AND Role = 'Student'", [student.StudentID]);
+    if (!accounts.length) return res.status(404).json({ message: "This student does not have a login account yet.", code: "NO_STUDENT_LOGIN" });
+    if (accounts.length > 1) return res.status(409).json({ message: "More than one Student login is linked to this student. Ask an administrator to resolve the duplicate accounts." });
+    if (!toIntlPhone(student.ParentPhone)) return res.status(400).json({ message: "This student has no valid parent phone number. Update it before preparing the WhatsApp message." });
+    const portalUrl = portalUrlFor(req);
+    if (!portalUrl) return res.status(500).json({ message: "Student Portal URL is not configured. Set FRONTEND_URL or open the Admin dashboard from the portal." });
+    const temporaryPassword = crypto.randomBytes(12).toString("hex");
+    const link = studentPortalWhatsAppUrl(student, accounts[0].Username, temporaryPassword, portalUrl);
+    if (!link) return res.status(400).json({ message: "The parent phone number could not be used for WhatsApp." });
+    const passwordHash = await bcrypt.hash(temporaryPassword, 10);
+    const updated = await db.query(
+      "UPDATE Users SET PasswordHash = ? OUTPUT INSERTED.UserId AS UserId WHERE UserId = ? AND StudentID = ? AND Role = 'Student'",
+      [passwordHash, accounts[0].UserId, student.StudentID]
+    );
+    if (!updated.length) return res.status(409).json({ message: "The student's login relationship changed. Please retry." });
+    res.json({ message: "Login verified. The WhatsApp message is prepared; it has not been sent.", username: accounts[0].Username, whatsappUrl: link });
   } catch (e) { fail(res, e); }
 };
 
+
+const createStudentLogin = async (req, res) => {
+  const username = String(req.body?.username || "").trim();
+  if (username.length < 3) return res.status(400).json({ message: "Username must be at least 3 characters." });
+  try {
+    const db = await getConnection();
+    const students = await db.query("SELECT StudentID, Name, ParentPhone FROM Students WHERE StudentID = ? AND IsActive = 1", [req.params.id]);
+    if (!students.length) return res.status(404).json({ message: "Student not found." });
+    const student = students[0];
+    const linked = await db.query("SELECT UserId FROM Users WHERE StudentID = ? AND Role = 'Student'", [student.StudentID]);
+    if (linked.length) return res.status(409).json({ message: "This student already has a login account. Use Link to prepare its credentials." });
+    if (!toIntlPhone(student.ParentPhone)) return res.status(400).json({ message: "This student has no valid parent phone number. Update it before preparing the WhatsApp message." });
+    const existing = await db.query("SELECT 1 AS x FROM Users WHERE Username = ?", [username]);
+    if (existing.length) return res.status(409).json({ message: "Username already exists." });
+    const portalUrl = portalUrlFor(req);
+    if (!portalUrl) return res.status(500).json({ message: "Student Portal URL is not configured. Set FRONTEND_URL or open the Admin dashboard from the portal." });
+    const temporaryPassword = crypto.randomBytes(12).toString("hex");
+    const link = studentPortalWhatsAppUrl(student, username, temporaryPassword, portalUrl);
+    if (!link) return res.status(400).json({ message: "The parent phone number could not be used for WhatsApp." });
+    const passwordHash = await bcrypt.hash(temporaryPassword, 10);
+    await db.query(
+      "INSERT INTO Users (FullName, Username, PasswordHash, Role, Phone, StudentID) VALUES (?, ?, ?, 'Student', ?, ?)",
+      [student.Name, username, passwordHash, String(student.ParentPhone).trim(), student.StudentID]
+    );
+    res.status(201).json({ message: "Student login created. The WhatsApp message is prepared; it has not been sent.", username, whatsappUrl: link });
+  } catch (e) { fail(res, e); }
+};
 /* ---------------- bulk import (CSV / XLS / XLSX) ---------------- */
 const importStudents = async (req, res) => {
   let rows;
@@ -189,99 +304,16 @@ const importStudents = async (req, res) => {
         const e2 = await db.query("SELECT 1 AS x FROM Students WHERE RollNumber = ? AND ClassID = ? AND SectionID = ?", [roll, cs.classId, cs.sectionId]);
         if (e2.length) { await dup(`Roll ${roll} already exists in ${label}.`); continue; }
 
-        const ins = await db.query(
-          "INSERT INTO Students (RollNumber, Name, Class, Section, ParentName, ParentPhone, ClassID, SectionID) OUTPUT INSERTED.StudentID AS id VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        await db.query(
+          "INSERT INTO Students (RollNumber, Name, Class, Section, ParentName, ParentPhone, ClassID, SectionID) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
           [roll, name, String(cs.classNumber), cs.sectionName, parentName, parentPhone, cs.classId, cs.sectionId]);
-        let login = null;
-        try { login = await createStudentLogin(db, { StudentID: Number(ins[0].id), Name: name, RollNumber: roll, ParentPhone: parentPhone }); }
-        catch (e) { console.error("[import login]", e.message); }
         const t = await db.query("SELECT COUNT(DISTINCT TeacherUserID) AS n FROM TeacherAssignments WHERE ClassID = ? AND SectionID = ?", [cs.classId, cs.sectionId]);
         result.imported++;
-        result.imported_rows.push({ row: r.__row, roll, name, classSection: label, teachersWhoSeeStudent: Number(t[0].n), username: login ? login.username : null, password: login && login.created ? login.password : null, whatsappUrl: login ? login.whatsappUrl || null : null });
+        result.imported_rows.push({ row: r.__row, roll, name, classSection: label, teachersWhoSeeStudent: Number(t[0].n) });
       } catch (e) { bad(e.message); }
     }
     res.json({ message: `Import finished: ${result.imported} imported, ${result.duplicates} duplicate, ${result.failed} failed.`, ...result });
   } catch (e) { fail(res, e); }
 };
 
-/* ---------------- student self: identity ALWAYS from JWT -> Users.StudentID ---------------- */
-const selfId = async (req, res) => {
-  const id = await getLinkedStudentId(req.user.userId);
-  if (id === null) { res.status(404).json({ message: "Your account is not linked to a student record yet.", code: "NOT_LINKED" }); return null; }
-  return id;
-};
-
-const getMyAttendanceSummary = async (req, res) => {
-  try {
-    const id = await selfId(req, res); if (id === null) return;
-    const db = await getConnection();
-    const r = await db.query("SELECT COUNT(*) AS total, SUM(CASE WHEN Status = 'Present' THEN 1 ELSE 0 END) AS present, SUM(CASE WHEN Status = 'Absent' THEN 1 ELSE 0 END) AS absent FROM Attendance WHERE StudentID = ?", [id]);
-    const total = Number(r[0].total) || 0, present = Number(r[0].present) || 0, absent = Number(r[0].absent) || 0;
-    res.json({ total, present, absent, percentage: total ? Math.round((present / total) * 1000) / 10 : null });
-  } catch (e) { fail(res, e); }
-};
-
-/* Timetable = TeacherAssignments of the student's own ClassID + SectionID (the schema has no weekday column,
-   so the same period schedule applies to every school day). */
-const getMyTimetable = async (req, res) => {
-  try {
-    const id = await selfId(req, res); if (id === null) return;
-    const db = await getConnection();
-    res.json(await db.query(
-      `SELECT ta.AssignmentID, ta.Period, sub.SubjectName AS Subject, u.FullName AS TeacherName,
-              CONVERT(VARCHAR(5), ta.StartTime, 108) AS StartTime, CONVERT(VARCHAR(5), ta.EndTime, 108) AS EndTime
-       FROM Students st
-       JOIN TeacherAssignments ta ON ta.ClassID = st.ClassID AND ta.SectionID = st.SectionID
-       JOIN Subjects sub ON sub.SubjectID = ta.SubjectID
-       JOIN Users u ON u.UserId = ta.TeacherUserID
-       WHERE st.StudentID = ? ORDER BY ta.Period`, [id]));
-  } catch (e) { fail(res, e); }
-};
-
-/* ---------------- Admin: login info / create / reset / bulk-create ---------------- */
-const loadStudent = async (db, id) => {
-  const r = await db.query("SELECT StudentID, RollNumber, Name, ParentPhone FROM Students WHERE StudentID = ?", [id]);
-  return r[0] || null;
-};
-
-const getLoginInfo = async (req, res) => {
-  try {
-    const db = await getConnection();
-    const st = await loadStudent(db, req.params.id);
-    if (!st) return res.status(404).json({ message: "Student not found." });
-    const u = await db.query("SELECT UserId, Username FROM Users WHERE StudentID = ? AND Role = 'Student'", [st.StudentID]);
-    res.json({ studentId: Number(st.StudentID), loginCreated: u.length > 0, username: u.length ? u[0].Username : null });
-  } catch (e) { fail(res, e); }
-};
-
-/* Creates the login if the student has none, otherwise resets to a new temporary password. */
-const resetPassword = async (req, res) => {
-  try {
-    const db = await getConnection();
-    const st = await loadStudent(db, req.params.id);
-    if (!st) return res.status(404).json({ message: "Student not found." });
-    const u = await db.query("SELECT UserId, Username FROM Users WHERE StudentID = ? AND Role = 'Student'", [st.StudentID]);
-    let out;
-    if (!u.length) out = await createStudentLogin(db, st);
-    else out = await resetStudentPassword(db, st, u[0].UserId, u[0].Username);
-    res.json({ message: u.length ? "Password reset. Send the new temporary password to the student." : "Login created.", username: out.username, password: out.password, whatsappUrl: out.whatsappUrl || null, whatsappError: out.whatsappError || null });
-  } catch (e) { fail(res, e); }
-};
-
-/* Existing students that have no login yet. */
-const createMissingLogins = async (req, res) => {
-  try {
-    const db = await getConnection();
-    const rows = await db.query("SELECT st.StudentID, st.RollNumber, st.Name, st.ParentPhone FROM Students st WHERE NOT EXISTS (SELECT 1 FROM Users u WHERE u.StudentID = st.StudentID)");
-    const created = [];
-    for (const st of rows) {
-      try {
-        const l = await createStudentLogin(db, st);
-        if (l.created) created.push({ studentId: Number(st.StudentID), name: st.Name, roll: st.RollNumber, username: l.username, password: l.password, whatsappUrl: l.whatsappUrl || null });
-      } catch (e) { console.error("[bulk login]", e.message); }
-    }
-    res.json({ message: `${created.length} login(s) created.`, created });
-  } catch (e) { fail(res, e); }
-};
-
-module.exports = { addStudent, getStudents, updateStudent, deleteStudent, getMe, getAccounts, linkAccount, importStudents, getMyAttendanceSummary, getMyTimetable, getLoginInfo, resetPassword, createMissingLogins };
+module.exports = { addStudent, getStudents, updateStudent, deleteStudent, deactivateStudent, getMe, getMyTimetable, getAccounts, linkAccount, createStudentLogin, importStudents };

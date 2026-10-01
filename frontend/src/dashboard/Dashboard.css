@@ -149,6 +149,19 @@
 .dash-table tbody tr:hover { background: var(--d-hover); }
 .dash-table .strong { font-weight: 600; }
 .dash-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.dash-day-heading { padding: 12px 20px 8px; font-family: "Bricolage Grotesque", sans-serif; font-size: 1rem; }
+.dash-timetable-cell { display: flex; flex-direction: column; gap: 4px; min-width: 150px; white-space: normal; }
+.dash-timetable-cell > span { color: var(--d-muted); font-size: .8rem; }
+.dash-timetable-cell .dash-head-actions { margin-top: 4px; }
+.dash-announcement-list { display: flex; flex-direction: column; }
+.dash-announcement { padding: 18px 20px; border-bottom: 1px solid var(--d-line); }
+.dash-announcement:last-child { border-bottom: 0; }
+.dash-announcement-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.dash-announcement-head h3 { font-family: "Bricolage Grotesque", sans-serif; font-size: 1.05rem; }
+.dash-announcement-message { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--d-ink); }
+.dash-announcement small { display: block; margin-top: 10px; color: var(--d-muted); }
+.dash-textarea { width: 100%; min-height: 120px; padding: 10px; border: 1px solid var(--d-line); border-radius: 6px; resize: vertical; background: var(--d-bg); color: var(--d-ink); font: inherit; }
+.dash-announcement-table .dash-announcement-message { max-width: 440px; font-size: .84rem; color: var(--d-muted); }
 #students .dash-table { min-width: 820px; }
 
 /* ---------- Overlay ---------- */

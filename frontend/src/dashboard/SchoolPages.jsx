@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Download, Upload, MessageCircle, Save, CheckCheck, RotateCcw, Trash2, Pencil } from "lucide-react";
+import { Download, Upload, MessageCircle, Save, CheckCheck, RotateCcw, Trash2, Pencil, CalendarDays, Copy } from "lucide-react";
 import { api, API, downloadCSV, dash, fmtDate, Panel, Tabs, Modal, RefreshButton, useNotify } from "./DashboardShared";
 
 /* All data on these pages comes from the Node/Express API (SQL Server). No mock data, no localStorage. */
@@ -128,6 +128,128 @@ function NameModal({ title, value, onSave, onClose }) {
   );
 }
 
+const WEEK_DAYS = [
+  { value: 1, label: "Monday" }, { value: 2, label: "Tuesday" }, { value: 3, label: "Wednesday" },
+  { value: 4, label: "Thursday" }, { value: 5, label: "Friday" }, { value: 6, label: "Saturday" },
+];
+const mostRecentDayDate = (dayOfWeek) => {
+  const date = new Date();
+  const jsDay = date.getDay();
+  const todayDay = jsDay === 0 ? 7 : jsDay;
+  date.setDate(date.getDate() - ((todayDay - Number(dayOfWeek) + 7) % 7));
+  return date.toLocaleDateString("en-CA");
+};
+
+export function TimetableManagementPage() {
+  const notify = useNotify();
+  const classes = useApi("/classes");
+  const sections = useApi("/sections");
+  const subjects = useApi("/subjects");
+  const teachers = useApi("/admin/teachers");
+  const [classId, setClassId] = useState("");
+  const [sectionId, setSectionId] = useState("");
+  const [targetClassId, setTargetClassId] = useState("");
+  const [targetSectionId, setTargetSectionId] = useState("");
+  const [teacherMapping, setTeacherMapping] = useState({});
+  const [editing, setEditing] = useState(null);
+  const schedule = useApi("/timetable/admin", { classId, sectionId });
+  const sectionOptions = (sections.data || []).filter((s) => String(s.ClassID) === String(classId)).map((s) => ({ value: s.SectionID, label: s.SectionName }));
+  const targetSectionOptions = (sections.data || []).filter((s) => String(s.ClassID) === String(targetClassId)).map((s) => ({ value: s.SectionID, label: s.SectionName }));
+  const entries = Array.isArray(schedule.data) ? schedule.data : [];
+  const sourceTeachers = [...new Map(entries.map((entry) => [String(entry.TeacherUserID), { id: entry.TeacherUserID, name: entry.TeacherName }])).values()];
+  useEffect(() => {
+    setTeacherMapping(Object.fromEntries(sourceTeachers.map((teacher) => [String(teacher.id), String(teacher.id)])));
+  }, [entries]);
+  const refresh = () => schedule.reload();
+
+  const remove = async (entry) => {
+    if (!window.confirm(`Delete Period ${entry.Period} on ${WEEK_DAYS[Number(entry.DayOfWeek) - 1]?.label}?`)) return;
+    try { notify((await api(`/timetable/admin/entries/${entry.TimetableEntryID}`, { method: "DELETE" })).message); await refresh(); }
+    catch (e) { notify(e.message, "error"); }
+  };
+
+  const copy = async () => {
+    try {
+      const result = await api("/timetable/admin/copy", { method: "POST", body: { sourceClassId: classId, sourceSectionId: sectionId, targetClassId, targetSectionId, teacherMapping } });
+      notify(result.message); setTargetClassId(""); setTargetSectionId("");
+    } catch (e) { notify(e.message, "error"); }
+  };
+
+  return (
+    <>
+      <Panel title="Weekly Timetable" sub="Manage real weekly periods for a class and section">
+        <div className="dash-filters">
+          <Sel label="Class" value={classId} onChange={(value) => { setClassId(value); setSectionId(""); }} all="Select class" options={(classes.data || []).map((c) => ({ value: c.ClassID, label: c.ClassName }))} />
+          <Sel label="Section" value={sectionId} onChange={setSectionId} all="Select section" options={sectionOptions} />
+          <RefreshButton onClick={refresh} busy={schedule.loading} />
+        </div>
+        {schedule.error && classId && sectionId && <Err msg={schedule.error} />}
+        {!classId || !sectionId ? <div className="dash-empty">Select a class and section to view its timetable.</div> : schedule.loading ? <div className="dash-empty">Loading timetable…</div> : (
+          <div className="dash-table-wrap"><table className="dash-table">
+            <thead><tr><th>Period</th>{WEEK_DAYS.map((day) => <th key={day.value}>{day.label}</th>)}</tr></thead>
+            <tbody>{Array.from({ length: 12 }, (_, index) => index + 1).map((period) => (
+              <tr key={period}><th>{period}</th>{WEEK_DAYS.map((day) => {
+                const entry = entries.find((item) => Number(item.DayOfWeek) === day.value && Number(item.Period) === period);
+                return <td key={day.value}>{entry ? (
+                  <div className="dash-timetable-cell"><strong>{entry.SubjectName}</strong><span>{entry.TeacherName}</span><span>{lectureTime(entry.StartTime, entry.EndTime)}</span>
+                    <div className="dash-head-actions"><button className="dash-ghost-btn sm" onClick={() => setEditing({ ...entry, DayOfWeek: day.value, Period: period })}><Pencil size={13} /> Edit</button><button className="dash-ghost-btn sm danger" onClick={() => remove(entry)}><Trash2 size={13} /> Delete</button></div>
+                  </div>
+                ) : <button className="dash-link" onClick={() => setEditing({ DayOfWeek: day.value, Period: period })}>+ Add entry</button>}</td>;
+              })}</tr>
+            ))}</tbody>
+          </table></div>
+        )}
+      </Panel>
+
+      {classId && sectionId && (
+        <Panel title="Copy Timetable" sub="Copy a complete weekly timetable to an empty section; conflicts are rejected without overwriting entries">
+          <div className="dash-filters">
+            <span className="dash-muted">Source: {classes.data?.find((c) => String(c.ClassID) === String(classId))?.ClassName || "—"} / {sections.data?.find((s) => String(s.SectionID) === String(sectionId))?.SectionName || "—"}</span>
+            {sourceTeachers.map((teacher) => <Sel key={teacher.id} label={`Use teacher for ${teacher.name}`} value={teacherMapping[String(teacher.id)] || String(teacher.id)} onChange={(value) => setTeacherMapping((current) => ({ ...current, [String(teacher.id)]: value }))} all="Select teacher" options={(teachers.data || []).map((t) => ({ value: t.UserId, label: t.FullName }))} />)}
+            <Sel label="Destination class" value={targetClassId} onChange={(value) => { setTargetClassId(value); setTargetSectionId(""); }} all="Select class" options={(classes.data || []).map((c) => ({ value: c.ClassID, label: c.ClassName }))} />
+            <Sel label="Destination section" value={targetSectionId} onChange={setTargetSectionId} all="Select section" options={targetSectionOptions} />
+            <button className="dash-primary-btn sm" disabled={!targetClassId || !targetSectionId} onClick={copy}><Copy size={14} /> Copy timetable</button>
+          </div>
+        </Panel>
+      )}
+      {editing && <TimetableEntryModal entry={editing} classId={classId} sectionId={sectionId} subjects={subjects.data || []} teachers={teachers.data || []} onClose={() => setEditing(null)} onSaved={async (message) => { setEditing(null); notify(message); await refresh(); }} />}
+    </>
+  );
+}
+
+function TimetableEntryModal({ entry, classId, sectionId, subjects, teachers, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    teacherUserId: entry.TeacherUserID ?? "", subjectId: entry.SubjectID ?? "",
+    startTime: entry.StartTime ? String(entry.StartTime).slice(0, 5) : "", endTime: entry.EndTime ? String(entry.EndTime).slice(0, 5) : "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const update = (key) => (value) => setForm((current) => ({ ...current, [key]: value }));
+  const save = async () => {
+    setBusy(true); setError("");
+    const body = { ...form, classId, sectionId, dayOfWeek: entry.DayOfWeek, period: entry.Period };
+    try {
+      const result = entry.TimetableEntryID
+        ? await api(`/timetable/admin/entries/${entry.TimetableEntryID}`, { method: "PUT", body })
+        : await api("/timetable/admin/entries", { method: "POST", body });
+      await onSaved(result.message);
+    } catch (e) { setError(e.message); }
+    finally { setBusy(false); }
+  };
+  return (
+    <Modal title={`${entry.TimetableEntryID ? "Edit" : "Add"} ${WEEK_DAYS[Number(entry.DayOfWeek) - 1]?.label} Period ${entry.Period}`} onClose={onClose}>
+      <div className="dash-form">
+        <Sel label="Subject" value={form.subjectId} onChange={update("subjectId")} all="Select subject" options={subjects.map((s) => ({ value: s.SubjectID, label: s.SubjectName }))} />
+        <Sel label="Teacher" value={form.teacherUserId} onChange={update("teacherUserId")} all="Select teacher" options={teachers.map((t) => ({ value: t.UserId, label: t.FullName }))} />
+        <label className="dash-field"><span>Start time</span><input type="time" value={form.startTime} onChange={(e) => update("startTime")(e.target.value)} required /></label>
+        <label className="dash-field"><span>End time</span><input type="time" value={form.endTime} onChange={(e) => update("endTime")(e.target.value)} required /></label>
+        {error && <Err msg={error} />}
+        <div className="dash-form-actions"><button className="dash-ghost-btn" onClick={onClose}>Cancel</button><button className="dash-primary-btn" disabled={busy || !form.teacherUserId || !form.subjectId || !form.startTime || !form.endTime} onClick={save}>{busy ? "Saving…" : "Save period"}</button></div>
+      </div>
+    </Modal>
+  );
+}
+
 /* =====================================================================
    ADMIN: Teacher assignments (Teacher + Class + Section + Subject + Period + times)
    ===================================================================== */
@@ -198,11 +320,30 @@ export function AssignmentsPage() {
 /* =====================================================================
    TEACHER: My Classes -> students -> mark attendance -> WhatsApp
    ===================================================================== */
-export function MyClassesPage() {
+export function TeacherTimetablePage({ onTakeAttendance }) {
+  const schedule = useApi("/timetable/teacher/me");
+  const entries = Array.isArray(schedule.data) ? schedule.data : [];
+  return (
+    <Panel title="My Timetable" sub={schedule.loading ? "Loading…" : `${entries.length} scheduled period${entries.length === 1 ? "" : "s"}`} right={<RefreshButton onClick={schedule.reload} busy={schedule.loading} />}>
+      {schedule.error ? <div className="dash-empty">{schedule.error}</div> : schedule.loading ? <div className="dash-empty">Loading your timetable…</div> : !entries.length ? <div className="dash-empty">No timetable assigned yet.</div> : (
+        <div className="dash-stack">{WEEK_DAYS.map((day) => {
+          const dayEntries = entries.filter((entry) => Number(entry.DayOfWeek) === day.value);
+          return <section key={day.value}><h2 className="dash-day-heading">{day.label}</h2>{!dayEntries.length ? <div className="dash-muted">No periods assigned.</div> : (
+            <div className="dash-table-wrap"><table className="dash-table"><thead><tr><th>Period</th><th>Time</th><th>Class</th><th>Section</th><th>Subject</th><th /></tr></thead><tbody>{dayEntries.map((entry) => (
+              <tr key={entry.TimetableEntryID}><td>{entry.Period}</td><td>{lectureTime(entry.StartTime, entry.EndTime)}</td><td>{entry.ClassNumber}</td><td>{entry.SectionName}</td><td className="strong">{entry.SubjectName}</td><td><button className="dash-primary-btn sm" onClick={() => onTakeAttendance?.({ ...entry, attendanceDate: mostRecentDayDate(entry.DayOfWeek) })}>Take Attendance</button></td></tr>
+            ))}</tbody></table></div>
+          )}</section>;
+        })}</div>
+      )}
+    </Panel>
+  );
+}
+
+export function MyClassesPage({ scheduledEntry = null, onExitSchedule }) {
   const notify = useNotify();
   const mine = useApi("/teacher/my-classes");
   const [sel, setSel] = useState(null);
-  const [date, setDate] = useState(new Date().toLocaleDateString("en-CA"));
+  const [date, setDate] = useState(scheduledEntry?.attendanceDate || new Date().toLocaleDateString("en-CA"));
   const [roster, setRoster] = useState(null);
   const [choices, setChoices] = useState({});
   const [loading, setLoading] = useState(false);
@@ -211,24 +352,30 @@ export function MyClassesPage() {
   const [abs, setAbs] = useState([]);
   const [showAll, setShowAll] = useState(false);
   const today = new Date().toLocaleDateString("en-CA");
+  const active = scheduledEntry || sel;
+  const isScheduled = Boolean(scheduledEntry);
 
   const loadRoster = useCallback(async () => {
-    if (!sel) return;
+    if (!active) return;
     setLoading(true);
-    try { setRoster(await api(`/lecture/${sel.AssignmentID}/students`, { query: { date } })); setChoices({}); }
+    try {
+      const path = isScheduled ? `/timetable/teacher/entries/${active.TimetableEntryID}/roster` : `/lecture/${active.AssignmentID}/students`;
+      setRoster(await api(path, { query: { date } })); setChoices({});
+    }
     catch (e) { notify(e.message, "error"); setRoster(null); }
     finally { setLoading(false); }
-  }, [sel, date, notify]);
+  }, [active, isScheduled, date, notify]);
   useEffect(() => { loadRoster(); }, [loadRoster]);
 
   // saved absentees of this lecture/date (from the existing absent-notifications endpoint)
   useEffect(() => {
-    if (!sel) return undefined;
+    if (!active) return undefined;
     let live = true;
-    api("/attendance/absent-notifications", { query: { assignmentId: sel.AssignmentID, date } })
+    const identity = isScheduled ? { timetableEntryId: active.TimetableEntryID } : { assignmentId: active.AssignmentID };
+    api("/attendance/absent-notifications", { query: { ...identity, date } })
       .then((d) => live && setAbs(Array.isArray(d) ? d : [])).catch(() => live && setAbs([]));
     return () => { live = false; };
-  }, [sel, date, roster]);
+  }, [active, isScheduled, date, roster]);
   const absById = Object.fromEntries(abs.map((n) => [n.studentId, n]));
 
   const students = roster?.students || [];
@@ -240,7 +387,8 @@ export function MyClassesPage() {
     if (!pending.length) return notify("Nothing to save. Mark at least one student.", "info");
     setSaving(true);
     try {
-      const r = await api("/attendance/mark-bulk", { method: "POST", body: { assignmentId: sel.AssignmentID, date, records: pending.map((s) => ({ studentId: s.StudentID, status: choices[s.StudentID] })) } });
+      const attendanceTarget = isScheduled ? { timetableEntryId: active.TimetableEntryID } : { assignmentId: active.AssignmentID };
+      const r = await api("/attendance/mark-bulk", { method: "POST", body: { ...attendanceTarget, date, records: pending.map((s) => ({ studentId: s.StudentID, status: choices[s.StudentID] })) } });
       notify(r.message, r.failed?.length ? "info" : "success");
       r.failed?.forEach((f) => notify(f.reason, "error"));
       setWa(r.notifications || []);
@@ -250,13 +398,38 @@ export function MyClassesPage() {
     finally { setSaving(false); }
   };
 
-  if (sel) {
-    const a = roster?.assignment || sel;
+  const batchNotify = () => {
+    const valid = abs.filter((n) => n.validPhone && n.url);
+    const invalid = abs.length - valid.length;
+    if (!abs.length) {
+      notify("There are no absent students to notify for this class and date.", "info");
+      return;
+    }
+    const message = `Open ${valid.length} WhatsApp message${valid.length === 1 ? "" : "s"} for valid parent numbers. ${invalid} invalid or missing phone number${invalid === 1 ? "" : "s"} will be skipped. This is click-to-send only; WhatsApp still requires the teacher to tap Send in the app.`;
+    if (!window.confirm(`${message}\n\nContinue?`)) return;
+    const urls = valid.map((n) => n.url).filter(Boolean);
+    if (!urls.length) {
+      notify("No valid parent WhatsApp numbers were found for the absent students.", "error");
+      return;
+    }
+    urls.forEach((url, index) => {
+      const win = window.open(url, index === 0 ? "_blank" : `wa-${index}`, "noopener,noreferrer");
+      if (!win) notify("Your browser blocked one or more WhatsApp windows. Please allow pop-ups and retry.", "info");
+    });
+    notify(`Opened ${urls.length} message${urls.length === 1 ? "" : "s"} to valid absent parents. ${invalid} invalid/missing phone number${invalid === 1 ? "" : "s"} were skipped.`, "success");
+  };
+
+  if (active) {
+    const a = roster?.assignment || active;
+    const leave = () => {
+      setSel(null); setRoster(null); setWa([]); setAbs([]); setShowAll(false);
+      if (isScheduled) onExitSchedule?.();
+    };
     return (
       <Panel
-        title={`Class ${sel.ClassNumber} - ${sel.SectionName} · ${sel.SubjectName}`}
-        sub={`Period ${sel.Period} · ${lectureTime(sel.StartTime, sel.EndTime)} · ${students.length} students · ${tot.p} present · ${tot.a} absent · ${tot.n} not marked`}
-        right={<button className="dash-ghost-btn" onClick={() => { setSel(null); setRoster(null); setWa([]); setAbs([]); setShowAll(false); }}>← My Classes</button>}
+        title={`Class ${a.ClassNumber} - ${a.SectionName} · ${a.SubjectName}`}
+        sub={`${WEEK_DAYS[Number(a.DayOfWeek) - 1]?.label ? `${WEEK_DAYS[Number(a.DayOfWeek) - 1].label} · ` : ""}Period ${a.Period} · ${lectureTime(a.StartTime, a.EndTime)} · ${students.length} students · ${tot.p} present · ${tot.a} absent · ${tot.n} not marked`}
+        right={<button className="dash-ghost-btn" onClick={leave}>{isScheduled ? "← My Timetable" : "← My Classes"}</button>}
       >
         <div className="dash-filters">
           <label className="dash-field"><span>Date</span><input type="date" max={today} value={date} onChange={(e) => { setDate(e.target.value || today); setWa([]); }} /></label>
@@ -287,8 +460,14 @@ export function MyClassesPage() {
         )}
         {abs.length > 0 && (
           <div style={{ marginTop: 16 }}>
-            <button className="dash-primary-btn sm" onClick={() => setShowAll((v) => !v)}><MessageCircle size={14} /> Notify All Absent Parents ({abs.length})</button>
-            {showAll && <><p className="dash-muted" style={{ marginTop: 8 }}>Each button opens WhatsApp with a prepared message. Nothing is sent until you press Send in WhatsApp.</p><WhatsAppList items={abs} /></>}
+            <div className="dash-cards" style={{ marginBottom: 12 }}>
+              {[['Total Absent', abs.length], ['Valid phone', abs.filter((n) => n.validPhone && n.url).length], ['Invalid / missing phone', abs.filter((n) => !n.validPhone || !n.url).length], ['Mode', 'Click-to-send']].map(([label, value]) => (
+                <div key={label} className="dash-card"><span>{label}</span><strong>{value}</strong></div>
+              ))}
+            </div>
+            <button className="dash-primary-btn sm" onClick={batchNotify}><MessageCircle size={14} /> Notify All Absent Parents via WhatsApp</button>
+            <button className="dash-ghost-btn sm" style={{ marginLeft: 8 }} onClick={() => setShowAll((v) => !v)}>{showAll ? "Hide" : "Show"} notification list</button>
+            {showAll && <><p className="dash-muted" style={{ marginTop: 8 }}>This feature uses the existing wa.me link flow. WhatsApp still requires the teacher to tap Send in the app unless a separate WhatsApp API is configured.</p><WhatsAppList items={abs} /></>}
           </div>
         )}
       </Panel>
@@ -385,8 +564,8 @@ export function ImportPage({ kind, onDone }) {
           <Issues title="Duplicate records" rows={res.duplicateRows} />
           {kind === "students" && res.imported_rows?.length > 0 && (
             <div className="dash-table-wrap"><table className="dash-table">
-              <thead><tr><th>Row</th><th>Roll</th><th>Name</th><th>Class-Section</th><th className="num">Teachers who now see this class</th><th>Username</th><th>Password</th><th>WhatsApp</th></tr></thead>
-              <tbody>{res.imported_rows.map((r) => <tr key={r.row}><td>{r.row}</td><td>{r.roll}</td><td>{r.name}</td><td>{r.classSection}</td><td className="num">{r.teachersWhoSeeStudent}</td><td>{r.username || "—"}</td><td>{r.password || "—"}</td><td>{r.whatsappUrl ? <a href={r.whatsappUrl} target="_blank" rel="noopener noreferrer">Send Login Details</a> : "—"}</td></tr>)}</tbody></table></div>)}
+              <thead><tr><th>Row</th><th>Roll</th><th>Name</th><th>Class-Section</th><th className="num">Teachers who now see this class</th></tr></thead>
+              <tbody>{res.imported_rows.map((r) => <tr key={r.row}><td>{r.row}</td><td>{r.roll}</td><td>{r.name}</td><td>{r.classSection}</td><td className="num">{r.teachersWhoSeeStudent}</td></tr>)}</tbody></table></div>)}
           {kind === "attendance" && <WhatsAppList items={res.notifications || []} />}
         </>
       )}
@@ -416,6 +595,8 @@ export function LectureReportsPage({ isAdmin }) {
   const [applied, setApplied] = useState(f);
   const rep = useApi("/attendance/report", applied);
   const sum = useApi("/attendance/summary", applied);
+  const analytics = useApi("/attendance/analytics", applied);
+  const low = useApi("/attendance/low-attendance", { ...applied, threshold: 75 });
   const set = (k) => (v) => setF((o) => ({ ...o, [k]: v, ...(k === "classId" ? { sectionId: "" } : {}) }));
   const rows = rep.data || [];
   const secOpts = (sections.data || []).filter((s) => !f.classId || String(s.ClassID) === String(f.classId)).map((s) => ({ value: s.SectionID, label: `${s.ClassNumber}-${s.SectionName}` }));
@@ -460,6 +641,36 @@ export function LectureReportsPage({ isAdmin }) {
         {[["Total", s?.total ?? "…"], ["Present", s?.present ?? "…"], ["Absent", s?.absent ?? "…"], ["Attendance %", s ? (s.percentage === null ? "—" : `${s.percentage}%`) : "…"]].map(([l, v]) => (
           <div key={l} className="dash-card"><span>{l}</span><strong>{v}</strong></div>))}
       </div>
+
+      <Panel title="Attendance Analytics" sub="Real attendance totals from the SQL Server tables">
+        {analytics.loading ? <div className="dash-empty">Loading analytics…</div> : analytics.error ? <div className="dash-empty">{analytics.error}</div> : (
+          <>
+            <div className="dash-cards">
+              {[["Class/Section groups", analytics.data?.classSection?.length ?? 0], ["Date entries", analytics.data?.dateSummary?.length ?? 0], ["Monthly months", analytics.data?.monthlySummary?.length ?? 0], ["Student summaries", analytics.data?.studentSummary?.length ?? 0]].map(([label, value]) => (
+                <div key={label} className="dash-card"><span>{label}</span><strong>{value}</strong></div>
+              ))}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 16, marginTop: 16 }}>
+              <div className="dash-table-wrap"><table className="dash-table"><thead><tr><th>Class</th><th>Section</th><th>Present</th><th>Absent</th><th>Attendance</th></tr></thead><tbody>{(analytics.data?.classSection || []).slice(0, 8).map((item, idx) => (
+                <tr key={`${item.classNumber}-${item.sectionName || idx}`}><td>{item.classNumber ?? "—"}</td><td>{item.sectionName || "—"}</td><td>{item.present}</td><td>{item.absent}</td><td>{item.percentage === null ? "—" : `${item.percentage}%`}</td></tr>
+              ))}</tbody></table></div>
+              <div className="dash-table-wrap"><table className="dash-table"><thead><tr><th>Month</th><th>Present</th><th>Absent</th><th>Attendance</th></tr></thead><tbody>{(analytics.data?.monthlySummary || []).slice(0, 6).map((item) => (
+                <tr key={`${item.year}-${item.month}`}><td>{item.month ? `${item.year}-${String(item.month).padStart(2, "0")}` : "—"}</td><td>{item.present}</td><td>{item.absent}</td><td>{item.percentage === null ? "—" : `${item.percentage}%`}</td></tr>
+              ))}</tbody></table></div>
+            </div>
+          </>
+        )}
+      </Panel>
+
+      <Panel title="Low Attendance Warning" sub="Students below the configured threshold from actual attendance records">
+        {low.loading ? <div className="dash-empty">Loading low-attendance list…</div> : low.error ? <div className="dash-empty">{low.error}</div> : (
+          !low.data?.students?.length ? <div className="dash-empty">No students are below the configured attendance threshold.</div> : (
+            <div className="dash-table-wrap"><table className="dash-table"><thead><tr><th>Student</th><th>Class</th><th>Section</th><th>Present</th><th>Absent</th><th>Attendance %</th></tr></thead><tbody>{low.data.students.map((student) => (
+              <tr key={student.studentId}><td className="strong">{student.name}</td><td>{student.classNumber ?? "—"}</td><td>{student.sectionName || "—"}</td><td>{student.present}</td><td>{student.absent}</td><td className="dash-low">{student.percentage === null ? "—" : `${student.percentage}%`}</td></tr>
+            ))}</tbody></table></div>
+          )
+        )}
+      </Panel>
 
       {!rows.length ? <div className="dash-empty">{rep.error || "No attendance records match these filters."}</div> : (
         <div className="dash-table-wrap"><table className="dash-table">

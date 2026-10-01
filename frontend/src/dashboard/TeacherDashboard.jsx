@@ -1,16 +1,19 @@
 import { useMemo, useState } from "react";
-import { LayoutDashboard, Users, School, ClipboardCheck, FileBarChart, Settings, CalendarCheck } from "lucide-react";
+import { LayoutDashboard, Users, School, ClipboardCheck, FileBarChart, Settings, CalendarCheck, CalendarDays, Megaphone } from "lucide-react";
 import {
   useDashboardData, summarize, recentRecords, statusToday, pctText, dash,
   Shell, StatCards, Panel, RecentTable, ErrorBanner, Pill,
 } from "./DashboardShared";
 import { StudentsPage, SettingsPage, buildStaffNotices } from "./DashboardPages";
-import { MyClassesPage, ImportPage, LectureReportsPage } from "./SchoolPages";
+import AnnouncementsPage from "./AnnouncementsPage";
+import { MyClassesPage, TeacherTimetablePage, ImportPage, LectureReportsPage } from "./SchoolPages";
 
 const NAV = [
   { key: "overview", label: "Overview", icon: LayoutDashboard },
   { key: "students", label: "Students", icon: Users },
   { key: "classes", label: "My Classes", icon: School },
+  { key: "timetable", label: "My Timetable", icon: CalendarDays },
+  { key: "announcements", label: "Announcements", icon: Megaphone },
   { key: "import-attendance", label: "Import Attendance", icon: ClipboardCheck },
   { key: "reports", label: "Reports", icon: FileBarChart },
   { key: "settings", label: "Settings", icon: Settings },
@@ -22,8 +25,9 @@ export default function TeacherDashboard({ user, onUserChange, onNavigate, onAct
   const { students, records, errors, loading, reload, todayKey } = data;
 
   const [page, setPage] = useState("overview");
+  const [scheduledEntry, setScheduledEntry] = useState(null);
   
-  const openPage = (p) => { setPage(p); onNavigate?.(p); };
+  const openPage = (p) => { if (p !== "classes") setScheduledEntry(null); setPage(p); onNavigate?.(p); };
   const goMark = () => { onAction?.("mark-attendance"); setPage("classes"); };
   const goRecords = () => setPage("reports");
 
@@ -114,7 +118,9 @@ export default function TeacherDashboard({ user, onUserChange, onNavigate, onAct
       )}
 
       {page === "students" && <StudentsPage data={data} isAdmin={false} addOpen={false} setAddOpen={() => {}} />}
-      {page === "classes" && <MyClassesPage />}
+      {page === "classes" && <MyClassesPage scheduledEntry={scheduledEntry} onExitSchedule={() => setScheduledEntry(null)} />}
+      {page === "timetable" && <TeacherTimetablePage onTakeAttendance={(entry) => { setScheduledEntry(entry); setPage("classes"); }} />}
+      {page === "announcements" && <AnnouncementsPage />}
       {page === "import-attendance" && <ImportPage kind="attendance" onDone={reload} />}
       {page === "reports" && <LectureReportsPage isAdmin={false} />}
       {page === "settings" && <SettingsPage user={user} onUserChange={onUserChange} onLogout={onLogout} />}

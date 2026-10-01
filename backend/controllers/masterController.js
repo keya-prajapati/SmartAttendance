@@ -73,7 +73,7 @@ const getSections = async (req, res) => {
         (
           SELECT COUNT(*)
           FROM Students st
-          WHERE st.SectionID = s.SectionID
+          WHERE st.SectionID = s.SectionID AND st.IsActive = 1
         ) AS StudentCount
       FROM Sections s
       JOIN Classes c ON c.ClassID = s.ClassID
@@ -323,6 +323,7 @@ const ASSIGN_SELECT = `
       FROM Students st
       WHERE st.ClassID = ta.ClassID
         AND st.SectionID = ta.SectionID
+        AND st.IsActive = 1
     ) AS StudentCount
 
   FROM TeacherAssignments ta
@@ -738,7 +739,8 @@ const lectureRoster = async (req, res) => {
         AND at.AssignmentID = ?
         AND CONVERT(date, at.[Date]) = ?
 
-      WHERE st.ClassID = ?
+      WHERE st.IsActive = 1
+        AND st.ClassID = ?
         AND st.SectionID = ?
 
       ORDER BY

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Download, Pencil, Trash2, UserPlus, Search, CheckCheck, RotateCcw, Save, MessageCircle, LogOut, Sun, Moon } from "lucide-react";
+import { Download, Pencil, Trash2, UserPlus, Link2, Search, CheckCheck, RotateCcw, Save, MessageCircle, LogOut, Sun, Moon } from "lucide-react";
 import {
   api, dash, pick, pctText, fmtDate, classLabel, downloadCSV, statusToday,
   Panel, Pill, RefreshButton, Tabs, Modal, useNotify, summarize, applyTheme, currentTheme, setStoredUser,
@@ -42,15 +42,40 @@ export function StudentsPage({ data, isAdmin, addOpen, setAddOpen }) {
   const [sec, setSec] = useState("");
   const [st, setSt] = useState("");
   const [linkFor, setLinkFor] = useState(null);
-  const [resetFor, setResetFor] = useState(null);
-  const [bulk, setBulk] = useState(null);
-  const createMissing = async () => {
-    try { const r = await api("/students/create-missing-logins", { method: "POST" }); setBulk(r); reload(); } catch (e) { notify(e.message, "error"); }
-  };
   const [editFor, setEditFor] = useState(null);
   const delStudent = async (s) => {
     if (!window.confirm(`Delete ${s.name}? (Not possible if the student already has attendance records.)`)) return;
-    try { notify((await api(`/students/${s.id}`, { method: "DELETE" })).message); reload(); } catch (e) { notify(e.message, "error"); }
+    try {
+      notify((await api(`/students/${s.id}`, { method: "DELETE" })).message);
+      await reload();
+    } catch (e) {
+      if (e.code !== "HAS_ATTENDANCE") return notify(e.message, "error");
+      notify(e.message, "error");
+      if (!window.confirm(`${e.message}\n\nDeactivate this student instead?`)) return;
+      try {
+        notify((await api(`/students/${s.id}/deactivate`, { method: "PATCH" })).message);
+        await reload();
+      } catch (deactivateError) {
+        notify(deactivateError.message, "error");
+      }
+    }
+  };
+  const linkStudent = async (s) => {
+    const popup = window.open("about:blank", "_blank");
+    if (!popup) return setLinkFor(s);
+    popup.opener = null;
+    try {
+      const res = await api(`/students/${s.id}/link`, { method: "PUT", body: {} });
+      if (!res.whatsappUrl) throw new Error("WhatsApp message could not be prepared.");
+      notify(res.message, "info");
+      if (popup.closed) setLinkFor({ ...s, preparedUrl: res.whatsappUrl });
+      else popup.location.href = res.whatsappUrl;
+      reload();
+    } catch (e) {
+      popup.close();
+      if (e.code === "NO_STUDENT_LOGIN") setLinkFor({ ...s, forceNeedsLogin: true });
+      else notify(e.message, "error");
+    }
   };
 
   const statusOf = useMemo(() => statusToday(records, todayKey), [records, todayKey]);
@@ -90,7 +115,6 @@ export function StudentsPage({ data, isAdmin, addOpen, setAddOpen }) {
           <div className="dash-head-actions">
             <RefreshButton onClick={reload} busy={refreshing} />
             <button className="dash-ghost-btn" onClick={exportCsv}><Download size={14} /> Export CSV</button>
-            {isAdmin && <button className="dash-ghost-btn" onClick={createMissing}>Create missing logins</button>}
             {isAdmin && <button className="dash-primary-btn sm" onClick={() => setAddOpen(true)}><UserPlus size={15} /> Add Student</button>}
           </div>
         }
@@ -120,7 +144,7 @@ export function StudentsPage({ data, isAdmin, addOpen, setAddOpen }) {
               <thead>
                 <tr>
                   <th>Roll No.</th><th>Name</th><th>Class</th><th>Section</th><th>Parent</th><th>Parent Phone</th><th>Today</th>
-                  {isAdmin && <><th>Username</th><th>Login Status</th><th>WhatsApp</th></>}{isAdmin && <th />}
+                  {isAdmin && <th>Login account</th>}{isAdmin && <th />}
                 </tr>
               </thead>
               <tbody>
@@ -133,20 +157,14 @@ export function StudentsPage({ data, isAdmin, addOpen, setAddOpen }) {
                     <td>{dash(s.parentName)}</td>
                     <td>{dash(s.parentPhone)}</td>
                     <td><Pill status={statusOf(s)} /></td>
-                    {isAdmin && <td>{dash(s.linkedUsername)}</td>}
-                    {isAdmin && <td>{s.linkedUsername ? "Created" : "Not Created"}</td>}
                     {isAdmin && (
-                      <td><div className="dash-head-actions">
+                      <td>
                         {s.linkedUsername ? (
-                          <>
-                            <button className="dash-ghost-btn sm" onClick={() => setResetFor(s)}><MessageCircle size={13} /> Send Login Details</button>
-                            <button className="dash-ghost-btn sm" onClick={() => setResetFor(s)}>Reset Login Password</button>
-                          </>
+                          <span className="dash-linked">{s.linkedUsername} <button className="dash-link" onClick={() => linkStudent(s)}>Link</button></span>
                         ) : (
-                          <button className="dash-ghost-btn sm" onClick={() => setResetFor(s)}>Create Login</button>
+                          <button className="dash-ghost-btn sm" onClick={() => linkStudent(s)}><Link2 size={13} /> Link</button>
                         )}
-                        <button className="dash-link" onClick={() => setLinkFor(s)}>Link</button>
-                      </div></td>
+                      </td>
                     )}
                     {isAdmin && (
                       <td><div className="dash-head-actions">
@@ -164,22 +182,6 @@ export function StudentsPage({ data, isAdmin, addOpen, setAddOpen }) {
 
       {addOpen && <AddStudentModal classes={classes} onClose={() => setAddOpen(false)} onDone={reload} />}
       {editFor && <AddStudentModal student={editFor} classes={classes} onClose={() => setEditFor(null)} onDone={reload} />}
-      {resetFor && <ResetLoginModal student={resetFor} onClose={() => setResetFor(null)} onDone={reload} />}
-      {bulk && (
-        <Modal title="Logins created" onClose={() => setBulk(null)}>
-          <div className="dash-form">
-            <p>{bulk.message} Passwords are shown only now.</p>
-            {bulk.created.length > 0 && (
-              <div className="dash-table-wrap"><table className="dash-table">
-                <thead><tr><th>Roll</th><th>Name</th><th>Username</th><th>Password</th><th>WhatsApp</th></tr></thead>
-                <tbody>{bulk.created.map((c) => <tr key={c.studentId}><td>{c.roll}</td><td>{c.name}</td><td>{c.username}</td><td>{c.password}</td>
-                  <td>{c.whatsappUrl ? <a href={c.whatsappUrl} target="_blank" rel="noopener noreferrer">Send Login Details</a> : "Invalid phone"}</td></tr>)}</tbody>
-              </table></div>
-            )}
-            <div className="dash-form-actions"><button className="dash-ghost-btn" onClick={() => setBulk(null)}>Close</button></div>
-          </div>
-        </Modal>
-      )}
       {linkFor && <LinkAccountModal student={linkFor} onClose={() => setLinkFor(null)} onDone={reload} />}
     </>
   );
@@ -187,11 +189,10 @@ export function StudentsPage({ data, isAdmin, addOpen, setAddOpen }) {
 
 function AddStudentModal({ classes, onClose, onDone, student }) {
   const notify = useNotify();
-  const [f, setF] = useState(student ? { rollNumber: student.roll ?? "", name: student.name ?? "", studentClass: String(student.cls ?? ""), section: student.section ?? "", parentName: student.parentName ?? "", parentPhone: student.parentPhone ?? "" } : { rollNumber: "", name: "", studentClass: "", section: "", parentName: "", parentPhone: "" });
+  const [f, setF] = useState(student ? { rollNumber: student.roll ?? "", name: student.name ?? "", studentClass: String(student.cls ?? ""), section: student.section ?? "", parentName: student.parentName ?? "", parentPhone: student.parentPhone ?? "", createLogin: false, username: "", password: "" } : { rollNumber: "", name: "", studentClass: "", section: "", parentName: "", parentPhone: "", createLogin: false, username: "", password: "" });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [created, setCreated] = useState(null);
-  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
 
   const submit = async (e) => {
     e.preventDefault();
@@ -200,20 +201,21 @@ function AddStudentModal({ classes, onClose, onDone, student }) {
       return setErr("Roll number, name, class, section and parent phone are required.");
     }
     if (!/^[0-9+\-()\s]{7,20}$/.test(f.parentPhone.trim())) return setErr("Enter a valid parent phone number.");
+    if (f.createLogin && (f.username.trim().length < 3 || f.password.length < 6)) {
+      return setErr("Login username needs 3+ characters and password 6+ characters.");
+    }
     setBusy(true);
     try {
       const res = student ? await api(`/students/${student.id}`, { method: "PUT", body: f }) : await api("/students/add", { method: "POST", body: f });
       notify(res.message, res.loginError ? "info" : "success");
       await onDone();
-      if (!student && res.username) { setCreated(res); } else onClose();
+      onClose();
     } catch (ex) {
       setErr(ex.message);
     } finally {
       setBusy(false);
     }
   };
-
-  if (created) return <CredentialsModal title="Student added" info={created} onClose={onClose} />;
 
   return (
     <Modal title={student ? "Edit Student" : "Add Student"} onClose={onClose}>
@@ -228,7 +230,16 @@ function AddStudentModal({ classes, onClose, onDone, student }) {
         </div>
         <datalist id="dash-class-list">{classes.map((c) => <option key={c} value={c} />)}</datalist>
 
-        {!student && <p className="dash-muted">A student login (username and password) is created automatically.</p>}
+        {!student && <label className="dash-check">
+          <input type="checkbox" checked={f.createLogin} onChange={set("createLogin")} />
+          Also create a student login for this student
+        </label>}
+        {!student && f.createLogin && (
+          <div className="dash-form-grid">
+            <label className="dash-field"><span>Username *</span><input value={f.username} onChange={set("username")} autoComplete="off" /></label>
+            <label className="dash-field"><span>Password *</span><input type="password" value={f.password} onChange={set("password")} autoComplete="new-password" /></label>
+          </div>
+        )}
 
         {err && <div className="dash-form-error" role="alert">{err}</div>}
         <div className="dash-form-actions">
@@ -240,74 +251,68 @@ function AddStudentModal({ classes, onClose, onDone, student }) {
   );
 }
 
-/* Shows generated credentials ONCE (the database only keeps the bcrypt hash). WhatsApp only opens a chat;
-   the admin still has to press send, so nothing is claimed as "sent". */
-export function CredentialsModal({ title, info, onClose }) {
-  return (
-    <Modal title={title} onClose={onClose}>
-      <div className="dash-form">
-        <p>{info.message || "Login credentials generated."}</p>
-        {info.username && (
-          <dl className="dash-facts">
-            <div><dt>Username</dt><dd>{info.username}</dd></div>
-            {info.password && <div><dt>Password</dt><dd>{info.password}</dd></div>}
-          </dl>
-        )}
-        {info.password && <p className="dash-muted">Note this password now - it is stored only as a hash and cannot be shown again.</p>}
-        {info.whatsappUrl
-          ? <a className="dash-primary-btn" href={info.whatsappUrl} target="_blank" rel="noopener noreferrer"><MessageCircle size={15} /> Send Login Details on WhatsApp</a>
-          : info.whatsappError && <div className="dash-form-error" role="alert">{info.whatsappError}</div>}
-        {info.whatsappUrl && <p className="dash-muted">This opens WhatsApp with the message ready. You still need to press Send there.</p>}
-        <div className="dash-form-actions"><button className="dash-ghost-btn" onClick={onClose}>Close</button></div>
-      </div>
-    </Modal>
-  );
-}
-
-function ResetLoginModal({ student, onClose, onDone }) {
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [res, setRes] = useState(null);
-  const hasLogin = !!student.linkedUsername;
-  const go = async () => {
-    setBusy(true); setErr("");
-    try { const r = await api(`/students/${student.id}/reset-password`, { method: "POST" }); setRes(r); await onDone(); }
-    catch (e) { setErr(e.message); } finally { setBusy(false); }
-  };
-  if (res) return <CredentialsModal title={hasLogin ? "Password reset" : "Login created"} info={res} onClose={onClose} />;
-  return (
-    <Modal title={hasLogin ? "Reset Login Password" : "Create Login"} onClose={onClose}>
-      <div className="dash-form">
-        <p>{hasLogin
-          ? `Existing passwords are stored as hashes and cannot be read. This generates a new temporary password for ${student.name}; the old one stops working.`
-          : `${student.name} has no login yet. This creates one and generates the username and password.`}</p>
-        {err && <div className="dash-form-error" role="alert">{err}</div>}
-        <div className="dash-form-actions">
-          <button className="dash-ghost-btn" onClick={onClose}>Cancel</button>
-          <button className="dash-primary-btn" disabled={busy} onClick={go}>{busy ? "Working…" : hasLogin ? "Generate new password" : "Create login"}</button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
 function LinkAccountModal({ student, onClose, onDone }) {
   const notify = useNotify();
-  const [accounts, setAccounts] = useState(null);
-  const [sel, setSel] = useState(student.linkedUserId ? String(student.linkedUserId) : "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [whatsappUrl, setWhatsappUrl] = useState(student.preparedUrl || "");
+  const [username, setUsername] = useState(student.linkedUsername || "");
+  const [needsLogin, setNeedsLogin] = useState(Boolean(student.forceNeedsLogin || !student.linkedUsername));
 
-  useEffect(() => {
-    api("/students/accounts").then(setAccounts).catch((e) => { setAccounts([]); setErr(e.message); });
-  }, []);
+  const prepare = async () => {
+    const popup = window.open("about:blank", "_blank");
+    if (popup) popup.opener = null;
+    setBusy(true);
+    setErr("");
+    setWhatsappUrl("");
+    try {
+      const res = await api(`/students/${student.id}/link`, { method: "PUT", body: {} });
+      notify(res.message);
+      setUsername(res.username);
+      if (res.whatsappUrl) {
+        if (popup && !popup.closed) popup.location.href = res.whatsappUrl;
+        else setWhatsappUrl(res.whatsappUrl);
+        await onDone();
+        return;
+      }
+      await onDone();
+      onClose();
+    } catch (e) {
+      popup?.close();
+      setErr(e.message);
+      if (e.code === "NO_STUDENT_LOGIN") setNeedsLogin(true);
+    } finally {
+      setBusy(false);
+    }
+  };
 
-  const save = async (userId) => {
+  const createLogin = async () => {
+    const popup = window.open("about:blank", "_blank");
+    if (popup) popup.opener = null;
+    setBusy(true);
+    setErr("");
+    setWhatsappUrl("");
+    try {
+      const res = await api(`/students/${student.id}/login`, { method: "POST", body: { username } });
+      notify(res.message);
+      setUsername(res.username);
+      setNeedsLogin(false);
+      if (popup && !popup.closed) popup.location.href = res.whatsappUrl;
+      else setWhatsappUrl(res.whatsappUrl);
+      await onDone();
+    } catch (e) {
+      popup?.close();
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unlink = async () => {
     setBusy(true);
     setErr("");
     try {
-      const res = await api(`/students/${student.id}/link`, { method: "PUT", body: { userId } });
-      notify(res.message);
+      notify((await api(`/students/${student.id}/link`, { method: "PUT", body: { unlink: true } })).message);
       await onDone();
       onClose();
     } catch (e) {
@@ -320,28 +325,28 @@ function LinkAccountModal({ student, onClose, onDone }) {
   return (
     <Modal title={`Login account for ${student.name ?? "student"}`} onClose={onClose}>
       <div className="dash-form">
-        <p className="dash-muted">Choose the Student login that belongs to this student. That login will then see only this student's record.</p>
-        {accounts === null ? (
-          <div className="dash-empty">Loading accounts…</div>
-        ) : accounts.length === 0 ? (
-          <div className="dash-empty">No Student login accounts exist yet. Register one with the Student role, or tick "create a student login" when adding a student.</div>
+        {needsLogin ? (
+          <>
+            <div className="dash-empty">This student does not have a login account yet.</div>
+            <label className="dash-field"><span>New Student username</span><input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off" /></label>
+            <button className="dash-primary-btn" disabled={busy || username.trim().length < 3} onClick={createLogin}>{busy ? "Creating…" : "Create login & prepare WhatsApp"}</button>
+          </>
         ) : (
-          <label className="dash-field">
-            <span>Student account</span>
-            <select value={sel} onChange={(e) => setSel(e.target.value)}>
-              <option value="">Select an account…</option>
-              {accounts.map((a) => {
-                const linkedElsewhere = a.StudentID != null && String(a.StudentID) !== String(student.id);
-                return <option key={a.UserId} value={a.UserId}>{a.FullName} ({a.Username}){linkedElsewhere ? " – linked to another student" : ""}</option>;
-              })}
-            </select>
-          </label>
+          <>
+            <p className="dash-muted">Student login: <strong>{username}</strong></p>
+            <button className="dash-primary-btn" disabled={busy} onClick={prepare}>{busy ? "Preparing…" : "Prepare WhatsApp message"}</button>
+          </>
         )}
         {err && <div className="dash-form-error" role="alert">{err}</div>}
+        {whatsappUrl && (
+          <div className="dash-empty" role="status">
+            <p>Credentials are ready in a pre-filled WhatsApp message. It will only be sent if you choose to send it in WhatsApp.</p>
+            <a className="dash-primary-btn" href={whatsappUrl} target="_blank" rel="noreferrer"><MessageCircle size={15} /> Open WhatsApp</a>
+          </div>
+        )}
         <div className="dash-form-actions">
-          {student.linkedUserId && <button className="dash-ghost-btn danger" disabled={busy} onClick={() => save(null)}>Unlink</button>}
+          {!needsLogin && student.linkedUserId && <button className="dash-ghost-btn danger" disabled={busy} onClick={unlink}>Unlink</button>}
           <button className="dash-ghost-btn" onClick={onClose}>Cancel</button>
-          <button className="dash-primary-btn" disabled={busy || !sel} onClick={() => save(Number(sel))}>{busy ? "Saving…" : "Save"}</button>
         </div>
       </div>
     </Modal>

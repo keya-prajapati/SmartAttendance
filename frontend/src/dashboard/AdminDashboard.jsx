@@ -1,14 +1,15 @@
 import { useMemo, useState } from "react";
 import {
   LayoutDashboard, Users, ClipboardCheck, FileBarChart, Settings,
-  UserPlus, FileText, Upload, BookOpen, UserCog,
+  UserPlus, FileText, Upload, BookOpen, UserCog, CalendarDays, Megaphone,
 } from "lucide-react";
 import {
   useDashboardData, summarize, classGroups, recentRecords, fmtDate, pctText, dash,
   Shell, StatCards, Panel, RecentTable, QuickActions, ErrorBanner, RefreshButton,
 } from "./DashboardShared";
 import { StudentsPage, SettingsPage, buildStaffNotices } from "./DashboardPages";
-import { SetupPage, AssignmentsPage, ImportPage, LectureReportsPage } from "./SchoolPages";
+import { SetupPage, AssignmentsPage, TimetableManagementPage, ImportPage, LectureReportsPage } from "./SchoolPages";
+import AnnouncementsPage from "./AnnouncementsPage";
 
 const NAV = [
   { key: "overview", label: "Overview", icon: LayoutDashboard },
@@ -16,6 +17,8 @@ const NAV = [
   { key: "import-students", label: "Import Students", icon: Upload },
   { key: "setup", label: "Classes & Subjects", icon: BookOpen },
   { key: "assignments", label: "Teacher Assignments", icon: UserCog },
+  { key: "timetable", label: "Timetable Management", icon: CalendarDays },
+  { key: "announcements", label: "Announcements", icon: Megaphone },
   { key: "reports", label: "Attendance Reports", icon: FileBarChart },
   { key: "import-attendance", label: "Import Attendance", icon: ClipboardCheck },
   { key: "settings", label: "Settings", icon: Settings },
@@ -150,6 +153,8 @@ export default function AdminDashboard({ user, onUserChange, onNavigate, onActio
       {page === "import-students" && <ImportPage kind="students" onDone={reload} />}
       {page === "setup" && <SetupPage />}
       {page === "assignments" && <AssignmentsPage />}
+      {page === "timetable" && <TimetableManagementPage />}
+      {page === "announcements" && <AnnouncementsPage isAdmin />}
       {page === "reports" && <LectureReportsPage isAdmin />}
       {page === "import-attendance" && <ImportPage kind="attendance" onDone={reload} />}
       {page === "settings" && <SettingsPage user={user} onUserChange={onUserChange} onLogout={onLogout} />}

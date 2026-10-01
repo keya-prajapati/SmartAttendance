@@ -1,5 +1,15 @@
 /* Manual "click to send" WhatsApp links (wa.me). Nothing is sent automatically. */
 
+const isAutoWhatsAppConfigured = () => Boolean(
+  process.env.WHATSAPP_API_KEY ||
+  process.env.WHATSAPP_ACCESS_TOKEN ||
+  process.env.WHATSAPP_PHONE_NUMBER_ID ||
+  process.env.TWILIO_ACCOUNT_SID ||
+  process.env.TWILIO_AUTH_TOKEN
+);
+
+const whatsappMode = () => (isAutoWhatsAppConfigured() ? "api" : "click_to_send");
+
 /* Returns digits with country code (default India +91) or null when the number is not valid. */
 const toIntlPhone = (parentPhone) => {
   let d = String(parentPhone || "").replace(/\D/g, "");
@@ -27,4 +37,4 @@ const whatsappUrl = (parentPhone, message) => {
 const openWhatsApp = (parentPhone, studentName, date) =>
   whatsappUrl(parentPhone, buildAbsentMessage({ name: studentName, date }));
 
-module.exports = { openWhatsApp, buildAbsentMessage, whatsappUrl, toIntlPhone };
+module.exports = { openWhatsApp, buildAbsentMessage, whatsappUrl, toIntlPhone, whatsappMode, isAutoWhatsAppConfigured };
